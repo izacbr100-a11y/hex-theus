@@ -1,0 +1,2922 @@
+
+--[[
+ HEX E THEUS BLOX FRUITS
+ HALLOWEEN HUB V4.4 - OTIMIZADO (M1 V4.1 + GACHA + STORE)
+
+ - Halloween 2 V2: portas, dialogos, monstros, doces
+ - Aboboras + NPCs: Pumpkin Hunt e Jack o' Lantern
+ - Prioridade ao Hellfire Gas
+ - Prioridade das portas sobre as aboboras
+ - Dialogos com varias perguntas consecutivas
+ - Escolhe respostas positivas e evita recusas
+ - Espera a proxima pergunta antes de clicar
+ - Voo turbo, noclip e anti-sofa
+ - Reconhece estilos de luta
+ - Minimizar e fechar tudo
+ - Auto Gacha: Purchase (Halloween26Gacha) confirmado
+ - Auto Store: StoreFruit em Tool fisica
+ - Gacha limitado a tentativas configuraveis
+ - Armazenamento pausa o combate e restaura o melee
+ - V4.4: cache de boss e busca de inimigos com intervalo
+ - V4.4: noclip limitado e rotacao da camera suavizada
+ - V4.4: restauracao segura ao desligar os farms
+ - F8 para desativar
+
+ Experimental. Entradas virtuais podem variar por executor.
+]]
+
+local C = {
+    Speed = 250,
+    CruiseHeight = 25,
+    AttackRange = 4.5,
+    AttackHeight = 3,
+    AttackOffset = 1.5,
+    AttackInterval = 0.05,
+    ClickHold = 0.03,
+
+    SearchRadius = 2800,
+    DoorEnemyRadius = 38,
+    DoorEnemySpawnWindow = 14,
+    DoorCooldown = 20,
+    DoorTimeout = 150,
+    SpawnGrace = 7,
+
+    DialogueStableTime = 0.6,
+    DialogueResponseWait = 1.3,
+    DialogueRetryTime = 0.7,
+    MaxDialogueSteps = 30,
+    MaxClicksPerQuestion = 8,
+
+    ScanInterval = 0.8,
+    BossScanInterval = 1.15,
+    DoorScanInterval = 1.25,
+    EnemyScanInterval = 0.9,
+    NoclipInterval = 0.13,
+    CharacterTurnInterval = 0.18,
+    CameraAimInterval = 0.12,
+    MethodTimeout = 3.5,
+    LoopInterval = 0.07,
+    GachaInterval = 15,
+    StoreRetrySeconds = 30,
+}
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local PPS = game:GetService("ProximityPromptService")
+local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player = Players.LocalPlayer
+assert(player, "Execute no cliente Roblox.")
+
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- Evitar dois Auto Gachas / Auto Stores simultaneos.
+local env = _G
+pcall(function()
+    if type(getgenv) == "function" then
+        env = getgenv()
+    end
+end)
+if env.HexCandyV1 and type(env.HexCandyV1.close) == "function" then
+    pcall(env.HexCandyV1.close)
+end
+local oldCandyUI = playerGui:FindFirstChild("HexCandyV1")
+if oldCandyUI then oldCandyUI:Destroy() end
+
+for _, name in ipairs({
+    "HexTheusHalloweenHub",
+    "HexTheusHalloweenHubV3",
+    "HexTheusHalloweenHubV4",
+    "HexTheusHalloweenHubV41",
+    "HexTheusHalloweenHubV42",
+    "HexTheusHalloweenHubV43",
+    "HexTheusHalloweenHubV44",
+    "HexTheusHalloweenHubV5",
+    "HexTheusHalloweenHubV6",
+    "HexTheusHalloweenHubV7",
+    "RexTeusHalloweenHub",
+    "JaxHalloweenDoorsV2",
+}) do
+    local old = playerGui:FindFirstChild(name)
+    if old then old:Destroy() end
+end
+
+local S = {
+    alive = true,
+    doors = false,
+    pumpkins = false,
+    minimized = false,
+    autoGacha = false,
+    autoStore = false,
+    gachaBusy = false,
+    storeBusy = false,
+    gachaAttempts = 0,
+    gachaRoundAttempts = 0,
+    gachaLimit = 5,
+    gachaNextAt = 0,
+    storedFruits = 0,
+    gachaStatus = "OFF",
+    storeStatus = "OFF",
+    gachaLock = false,
+    storePauseUntil = 0,
+
+    encounter = nil,
+    pumpkinTarget = nil,
+    raidBoss = nil,
+
+    candy = 0,
+    completedDoors = 0,
+    completedPumpkins = 0,
+
+    selectedStyle = nil,
+    bestMethod = nil,
+    combat = nil,
+
+    flight = nil,
+    travel = nil,
+    camera = nil,
+
+    lastBossScan = 0,
+    lastDoorScan = 0,
+    doorCache = {},
+
+    lastNotice = "",
+    lastNoticeAt = 0,
+    lastUIUpdate = 0,
+
+    dialogueSteps = 0,
+    lastCharacterTurn = 0,
+    lastCameraAim = 0,
+    lastNoclip = 0,
+}
+
+local connections = {}
+
+local collisions = setmetatable({}, {__mode = "k"})
+local doorCooldowns = setmetatable({}, {__mode = "k"})
+local pumpkinCooldowns = setmetatable({}, {__mode = "k"})
+local pendingEnemies = setmetatable({}, {__mode = "k"})
+local watchedNotifications = setmetatable({}, {__mode = "k"})
+local storeRetryAt = setmetatable({}, {__mode = "k"})
+
+local seatHumanoid
+local originalSeatEnabled
+
+local virtualInput
+local virtualUser
+local virtualInputManager
+
+pcall(function()
+    virtualInput = UIS:CreateVirtualInput()
+end)
+
+pcall(function()
+    virtualUser = game:GetService("VirtualUser")
+    virtualUser:CaptureController()
+end)
+
+pcall(function()
+    virtualInputManager = game:GetService("VirtualInputManager")
+end)
+
+local function connect(signal, callback)
+    local connection = signal:Connect(callback)
+    table.insert(connections, connection)
+    return connection
+end
+
+local function color(r, g, b)
+    return Color3.fromRGB(r, g, b)
+end
+
+local function create(className, parent, props)
+    local object = Instance.new(className)
+
+    for key, value in pairs(props or {}) do
+        object[key] = value
+    end
+
+    object.Parent = parent
+    return object
+end
+
+local function round(object, radius)
+    create("UICorner", object, {
+        CornerRadius = UDim.new(0, radius),
+    })
+end
+
+-- =========================================
+-- MENU
+-- =========================================
+
+local gui = create("ScreenGui", playerGui, {
+    Name = "HexTheusHalloweenHubV44",
+    ResetOnSpawn = false,
+    DisplayOrder = 5000,
+})
+
+local panel = create("Frame", gui, {
+    Position = UDim2.new(0.5, -240, 0.10, 0),
+    Size = UDim2.fromOffset(480, 610),
+    BackgroundColor3 = color(24, 15, 19),
+    BorderSizePixel = 0,
+    ClipsDescendants = true,
+})
+round(panel, 15)
+
+create("UIStroke", panel, {
+    Color = color(210, 39, 58),
+    Thickness = 1.4,
+})
+
+local header = create("Frame", panel, {
+    Size = UDim2.new(1, 0, 0, 77),
+    BackgroundColor3 = color(183, 24, 43),
+    BorderSizePixel = 0,
+})
+
+create("UIGradient", header, {
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, color(237, 48, 65)),
+        ColorSequenceKeypoint.new(1, color(103, 11, 30)),
+    }),
+    Rotation = 10,
+})
+
+create("TextLabel", header, {
+    Position = UDim2.fromOffset(18, 11),
+    Size = UDim2.fromOffset(360, 29),
+    BackgroundTransparency = 1,
+    Text = "HEX E THEUS BLOX FRUITS",
+    Font = Enum.Font.GothamBlack,
+    TextSize = 19,
+    TextColor3 = color(255, 255, 255),
+    TextXAlignment = Enum.TextXAlignment.Left,
+})
+
+create("TextLabel", header, {
+    Position = UDim2.fromOffset(19, 45),
+    Size = UDim2.fromOffset(340, 16),
+    BackgroundTransparency = 1,
+    Text = "HALLOWEEN HUB  |  M1 V4.1 + GACHA/STORE V4.4",
+    Font = Enum.Font.GothamMedium,
+    TextSize = 10,
+    TextColor3 = color(255, 218, 223),
+    TextXAlignment = Enum.TextXAlignment.Left,
+})
+
+local minimize = create("TextButton", header, {
+    Position = UDim2.new(1, -80, 0, 14),
+    Size = UDim2.fromOffset(29, 29),
+    BackgroundColor3 = color(115, 18, 35),
+    Text = "-",
+    TextColor3 = color(255, 255, 255),
+    Font = Enum.Font.GothamBold,
+    TextSize = 17,
+})
+round(minimize, 7)
+
+local close = create("TextButton", header, {
+    Position = UDim2.new(1, -44, 0, 14),
+    Size = UDim2.fromOffset(29, 29),
+    BackgroundColor3 = color(83, 9, 23),
+    Text = "X",
+    TextColor3 = color(255, 255, 255),
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+})
+round(close, 7)
+
+local body = create("Frame", panel, {
+    Position = UDim2.fromOffset(0, 77),
+    Size = UDim2.new(1, 0, 1, -77),
+    BackgroundTransparency = 1,
+})
+
+local function modeCard(y, number, name, description)
+    local card = create("Frame", body, {
+        Position = UDim2.fromOffset(17, y),
+        Size = UDim2.fromOffset(446, 77),
+        BackgroundColor3 = color(43, 30, 36),
+        BorderSizePixel = 0,
+    })
+    round(card, 10)
+
+    create("UIStroke", card, {
+        Color = color(105, 55, 65),
+        Thickness = 1,
+    })
+
+    create("TextLabel", card, {
+        Position = UDim2.fromOffset(15, 11),
+        Size = UDim2.fromOffset(315, 22),
+        BackgroundTransparency = 1,
+        Text = number .. "  " .. name,
+        Font = Enum.Font.GothamBold,
+        TextSize = 14,
+        TextColor3 = color(255, 255, 255),
+        TextXAlignment = Enum.TextXAlignment.Left,
+    })
+
+    create("TextLabel", card, {
+        Position = UDim2.fromOffset(15, 35),
+        Size = UDim2.fromOffset(310, 30),
+        BackgroundTransparency = 1,
+        Text = description,
+        Font = Enum.Font.Gotham,
+        TextSize = 11,
+        TextColor3 = color(208, 184, 191),
+        TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+    })
+
+    local toggle = create("TextButton", card, {
+        Position = UDim2.fromOffset(341, 21),
+        Size = UDim2.fromOffset(88, 35),
+        BackgroundColor3 = color(82, 71, 77),
+        Text = "OFF",
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        TextColor3 = color(255, 255, 255),
+    })
+    round(toggle, 9)
+
+    return toggle
+end
+
+local doorToggle = modeCard(
+    9,
+    "01",
+    "HALLOWEEN 2 V2",
+    "Portas, perguntas, monstros e Hellfire Gas"
+)
+
+local pumpkinToggle = modeCard(
+    92,
+    "02",
+    "ABOBORAS + NPCs",
+    "Pumpkin Hunt, Jack o' Lantern e doces"
+)
+
+local gachaToggle = modeCard(
+    175,
+    "03",
+    "AUTO GACHA - CANDY CORN",
+    "Purchase via GachaNetworkRF; ate o limite por ativacao"
+)
+
+local storeToggle = modeCard(
+    258,
+    "04",
+    "AUTO STORE DE FRUTAS",
+    "Guarda frutas fisicas; evita confundir poderes de fruta"
+)
+
+local spinOnceButton = create("TextButton", body, {
+    Position = UDim2.fromOffset(18, 344),
+    Size = UDim2.fromOffset(150, 32),
+    BackgroundColor3 = color(173, 39, 54),
+    Text = "GIRAR 1 VEZ",
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    TextColor3 = color(255, 255, 255),
+})
+round(spinOnceButton, 8)
+
+create("TextLabel", body, {
+    Position = UDim2.fromOffset(184, 350),
+    Size = UDim2.fromOffset(177, 20),
+    BackgroundTransparency = 1,
+    Text = "LIMITE DE GIROS:",
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
+    TextColor3 = color(240, 213, 220),
+    TextXAlignment = Enum.TextXAlignment.Left,
+})
+
+local gachaLimitInput = create("TextBox", body, {
+    Position = UDim2.fromOffset(365, 344),
+    Size = UDim2.fromOffset(92, 32),
+    BackgroundColor3 = color(57, 39, 49),
+    Text = "5",
+    ClearTextOnFocus = false,
+    PlaceholderText = "5",
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    TextColor3 = color(255, 255, 255),
+})
+round(gachaLimitInput, 8)
+
+local priorityLabel = create("TextLabel", body, {
+    Position = UDim2.fromOffset(18, 386),
+    Size = UDim2.fromOffset(440, 19),
+    BackgroundTransparency = 1,
+    Text = "PRIORIDADE: AGUARDANDO",
+    TextColor3 = color(255, 127, 139),
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Left,
+})
+
+local statusLabel = create("TextLabel", body, {
+    Position = UDim2.fromOffset(18, 410),
+    Size = UDim2.fromOffset(440, 20),
+    BackgroundTransparency = 1,
+    Text = "Pronto para iniciar.",
+    TextColor3 = color(255, 255, 255),
+    Font = Enum.Font.Gotham,
+    TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+})
+
+local dialogueLabel = create("TextLabel", body, {
+    Position = UDim2.fromOffset(18, 435),
+    Size = UDim2.fromOffset(440, 19),
+    BackgroundTransparency = 1,
+    Text = "DIALOGO: AGUARDANDO",
+    TextColor3 = color(255, 194, 200),
+    Font = Enum.Font.GothamMedium,
+    TextSize = 10,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+})
+
+local counters = create("TextLabel", body, {
+    Position = UDim2.fromOffset(18, 506),
+    Size = UDim2.fromOffset(440, 19),
+    BackgroundTransparency = 1,
+    Text = "CANDY: 0 | PORTAS: 0 | ABOBORAS: 0",
+    TextColor3 = color(245, 103, 116),
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Left,
+})
+
+local gachaStatusLabel = create("TextLabel", body, {
+    Position = UDim2.fromOffset(18, 458),
+    Size = UDim2.fromOffset(440, 19),
+    BackgroundTransparency = 1,
+    Text = "GACHA: OFF",
+    Font = Enum.Font.GothamMedium,
+    TextSize = 10,
+    TextColor3 = color(255, 197, 206),
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+})
+
+local storeStatusLabel = create("TextLabel", body, {
+    Position = UDim2.fromOffset(18, 481),
+    Size = UDim2.fromOffset(440, 19),
+    BackgroundTransparency = 1,
+    Text = "STORE: OFF",
+    Font = Enum.Font.GothamMedium,
+    TextSize = 10,
+    TextColor3 = color(255, 197, 206),
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+})
+
+local function updateUI(message, force)
+    if not S.alive then return end
+
+    if not force
+        and os.clock() - S.lastUIUpdate < 0.15 then
+        return
+    end
+
+    S.lastUIUpdate = os.clock()
+
+    doorToggle.Text = S.doors and "ON" or "OFF"
+    pumpkinToggle.Text = S.pumpkins and "ON" or "OFF"
+    gachaToggle.Text = S.autoGacha and "ON" or "OFF"
+    storeToggle.Text = S.autoStore and "ON" or "OFF"
+    gachaToggle.BackgroundColor3 = S.autoGacha
+        and color(213, 37, 54)
+        or color(82, 71, 77)
+    storeToggle.BackgroundColor3 = S.autoStore
+        and color(213, 37, 54)
+        or color(82, 71, 77)
+    gachaStatusLabel.Text = "GACHA: " .. S.gachaStatus
+    storeStatusLabel.Text = "STORE: " .. S.storeStatus
+
+    doorToggle.BackgroundColor3 = S.doors
+        and color(213, 37, 54)
+        or color(82, 71, 77)
+
+    pumpkinToggle.BackgroundColor3 = S.pumpkins
+        and color(213, 37, 54)
+        or color(82, 71, 77)
+
+    counters.Text = string.format(
+        "CANDY GANHO: %d | PORTAS: %d | ABOBORAS: %d | GIROS: %d | STORES: %d",
+        S.candy,
+        S.completedDoors,
+        S.completedPumpkins,
+        S.gachaAttempts,
+        S.storedFruits
+    )
+
+    if message then
+        statusLabel.Text = message
+    end
+end
+
+local function dialogueStatus(text)
+    if S.alive then
+        dialogueLabel.Text = "DIALOGO: " .. text
+    end
+end
+
+minimize.Activated:Connect(function()
+    S.minimized = not S.minimized
+
+    body.Visible = not S.minimized
+
+    panel.Size = UDim2.fromOffset(
+        480,
+        S.minimized and 77 or 610
+    )
+
+    minimize.Text = S.minimized and "+" or "-"
+end)
+
+-- Arrastar somente pelo titulo; clicar em - ou X nao inicia arraste.
+local dragHandle = create("Frame", header, {
+    Position = UDim2.fromOffset(0, 0),
+    Size = UDim2.new(1, -92, 1, 0),
+    BackgroundTransparency = 1,
+    Active = true,
+})
+
+local dragging = false
+local dragStart
+local panelStart
+
+connect(dragHandle.InputBegan, function(input)
+    if input.UserInputType ==
+        Enum.UserInputType.MouseButton1 then
+
+        dragging = true
+        dragStart = input.Position
+        panelStart = panel.Position
+    end
+end)
+
+connect(UIS.InputEnded, function(input)
+    if input.UserInputType ==
+        Enum.UserInputType.MouseButton1 then
+
+        dragging = false
+    end
+end)
+
+connect(UIS.InputChanged, function(input)
+    if dragging
+        and input.UserInputType ==
+        Enum.UserInputType.MouseMovement then
+
+        local delta = input.Position - dragStart
+
+        panel.Position = UDim2.new(
+            panelStart.X.Scale,
+            panelStart.X.Offset + delta.X,
+            panelStart.Y.Scale,
+            panelStart.Y.Offset + delta.Y
+        )
+    end
+end)
+
+-- =========================================
+-- PERSONAGEM
+-- =========================================
+
+local function characterParts()
+    local character = player.Character
+
+    local humanoid = character
+        and character:FindFirstChildOfClass("Humanoid")
+
+    local root = character
+        and character:FindFirstChild("HumanoidRootPart")
+
+    if humanoid and root and humanoid.Health > 0 then
+        return character, humanoid, root
+    end
+
+    return nil
+end
+
+local function positionOf(object)
+    if not object then return nil end
+
+    if object:IsA("Attachment") then
+        return object.WorldPosition
+    end
+
+    if object:IsA("BasePart") then
+        return object.Position
+    end
+
+    if object:IsA("Model") then
+        local part = object:FindFirstChild(
+            "HumanoidRootPart", true
+        ) or object.PrimaryPart
+            or object:FindFirstChildWhichIsA(
+                "BasePart", true
+            )
+
+        return part and part.Position
+    end
+
+    return object.Parent
+        and positionOf(object.Parent)
+        or nil
+end
+
+-- =========================================
+-- VOO
+-- =========================================
+
+local function destroyFlight()
+    if S.flight then
+        local flight = S.flight
+
+        pcall(function()
+            flight.align:Destroy()
+            flight.attachment:Destroy()
+        end)
+
+        if flight.humanoid and flight.humanoid.Parent then
+            flight.humanoid.AutoRotate = flight.oldRotate
+        end
+    end
+
+    S.flight = nil
+    S.travel = nil
+end
+
+local function ensureFlight(root, humanoid)
+    if S.flight and S.flight.root == root then
+        return S.flight
+    end
+
+    destroyFlight()
+
+    local attachment = Instance.new("Attachment")
+    attachment.Parent = root
+
+    local align = Instance.new("AlignPosition")
+    align.Mode = Enum.PositionAlignmentMode.OneAttachment
+    align.Attachment0 = attachment
+    align.ApplyAtCenterOfMass = true
+    align.RigidityEnabled = false
+    align.ForceLimitMode = Enum.ForceLimitMode.Magnitude
+    align.MaxForce = 100000000
+    align.MaxVelocity = C.Speed
+    align.Responsiveness = 150
+    align.Position = root.Position
+    align.Parent = root
+
+    S.flight = {
+        root = root,
+        humanoid = humanoid,
+        attachment = attachment,
+        align = align,
+        oldRotate = humanoid.AutoRotate,
+    }
+
+    humanoid.AutoRotate = false
+
+    return S.flight
+end
+
+local function approachPoint(from, target, height)
+    local delta = from - target
+    local flat = Vector3.new(delta.X, 0, delta.Z)
+
+    local direction = flat.Magnitude > 0.1
+        and flat.Unit
+        or Vector3.new(1, 0, 0)
+
+    return target
+        + direction * C.AttackOffset
+        + Vector3.new(0, height, 0)
+end
+
+local function setFlight(root, humanoid, goal, face)
+    local flight = ensureFlight(root, humanoid)
+
+    flight.align.Position = goal
+
+    if face then
+        local now = os.clock()
+        if now - S.lastCharacterTurn >= C.CharacterTurnInterval then
+            local delta = face - root.Position
+            local flat = Vector3.new(delta.X, 0, delta.Z)
+            if flat.Magnitude > 0.1 then
+                local direction = flat.Unit
+                local facing = Vector3.new(root.CFrame.LookVector.X, 0,
+                    root.CFrame.LookVector.Z)
+                -- So ajustar a orientacao quando o alvo estiver
+                -- claramente fora da direcao do personagem.
+                if facing.Magnitude < 0.1 or facing.Unit:Dot(direction) < 0.98 then
+                    root.CFrame = CFrame.lookAt(root.Position,
+                        root.Position + direction)
+                end
+            end
+            S.lastCharacterTurn = now
+        end
+    end
+end
+
+local function travelTo(key, target, range)
+    local _, humanoid, root = characterParts()
+    if not root then return false end
+
+    if (root.Position - target).Magnitude <= range then
+        S.travel = nil
+        return true
+    end
+
+    if not S.travel or S.travel.key ~= key then
+        S.travel = {
+            key = key,
+            altitude = math.max(
+                root.Position.Y,
+                target.Y
+            ) + C.CruiseHeight,
+        }
+    end
+
+    local delta = target - root.Position
+
+    local horizontal = Vector3.new(
+        delta.X, 0, delta.Z
+    ).Magnitude
+
+    local altitude = S.travel.altitude
+    local goal
+
+    if horizontal > 18 then
+        if root.Position.Y < altitude - 3 then
+            goal = Vector3.new(
+                root.Position.X,
+                altitude,
+                root.Position.Z
+            )
+        else
+            goal = Vector3.new(
+                target.X,
+                altitude,
+                target.Z
+            )
+        end
+    else
+        goal = approachPoint(
+            root.Position,
+            target,
+            1.5
+        )
+    end
+
+    setFlight(root, humanoid, goal, target)
+
+    return false
+end
+
+-- =========================================
+-- ANTI-SOFA
+-- =========================================
+
+local function restoreSeat()
+    if seatHumanoid and seatHumanoid.Parent
+        and originalSeatEnabled ~= nil then
+
+        pcall(function()
+            seatHumanoid:SetStateEnabled(
+                Enum.HumanoidStateType.Seated,
+                originalSeatEnabled
+            )
+        end)
+    end
+
+    seatHumanoid = nil
+    originalSeatEnabled = nil
+end
+
+local function protectSeat(humanoid)
+    if seatHumanoid == humanoid then return end
+
+    restoreSeat()
+
+    seatHumanoid = humanoid
+
+    local ok, enabled = pcall(function()
+        return humanoid:GetStateEnabled(
+            Enum.HumanoidStateType.Seated
+        )
+    end)
+
+    if ok then
+        originalSeatEnabled = enabled
+    end
+
+    pcall(function()
+        humanoid:SetStateEnabled(
+            Enum.HumanoidStateType.Seated,
+            false
+        )
+    end)
+end
+
+local noclipConnection = RunService.Stepped:Connect(function()
+    if not S.alive or not (S.doors or S.pumpkins) then
+        return
+    end
+    -- Evita GetDescendants() em TODOS os frames fisicos.
+    local now = os.clock()
+    if now - S.lastNoclip < C.NoclipInterval then return end
+    S.lastNoclip = now
+
+    local character, humanoid = characterParts()
+    if not character then return end
+
+    protectSeat(humanoid)
+
+    for _, part in ipairs(character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            if collisions[part] == nil then
+                collisions[part] = part.CanCollide
+            end
+
+            part.CanCollide = false
+        end
+    end
+
+    if humanoid.Sit then
+        humanoid.Sit = false
+        humanoid.Jump = true
+    end
+end)
+
+local function restoreMovement()
+    destroyFlight()
+    restoreSeat()
+
+    for part, value in pairs(collisions) do
+        if part.Parent then
+            pcall(function()
+                part.CanCollide = value
+            end)
+        end
+
+        collisions[part] = nil
+    end
+end
+
+-- =========================================
+-- ESTILOS
+-- =========================================
+
+local knownStyles = {}
+
+for _, name in ipairs({
+    "Combat",
+    "Dark Step",
+    "Electric",
+    "Water Kung Fu",
+    "Dragon Breath",
+    "Superhuman",
+    "Death Step",
+    "Fishman Karate",
+    "Shark Karate",
+    "Sharkman Karate",
+    "Electric Claw",
+    "Dragon Talon",
+    "Godhuman",
+    "Sanguine Art",
+}) do
+    knownStyles[name:lower()] = true
+end
+
+local function isMelee(tool)
+    if not tool or not tool:IsA("Tool") then
+        return false
+    end
+
+    -- Nao tratar ferramenta de outra categoria como estilo de luta.
+    if knownStyles[tool.Name:lower()] then
+        return true
+    end
+
+    local hint = tool.ToolTip:lower()
+    if hint:find("melee", 1, true) then
+        return true
+    end
+
+    for _, attribute in ipairs({"Type", "Category", "WeaponType"}) do
+        local value = tool:GetAttribute(attribute)
+        if type(value) == "string" and value:lower() == "melee" then
+            return true
+        end
+    end
+
+    return false
+end
+
+local lastEquipAttempt = 0
+local lastMissingStyleLog = 0
+
+local function getMelee()
+    local character, humanoid = characterParts()
+    if not character then return nil end
+
+    local backpack = player:FindFirstChildOfClass("Backpack")
+    local equipped = character:FindFirstChildWhichIsA("Tool")
+
+    if equipped and isMelee(equipped) then
+        S.selectedStyle = equipped.Name
+        return equipped
+    end
+
+    -- Primeiro tentar exatamente o estilo usado anteriormente.
+    local selected = nil
+    for _, container in ipairs({character, backpack}) do
+        if container then
+            for _, tool in ipairs(container:GetChildren()) do
+                if tool:IsA("Tool") and isMelee(tool)
+                    and tool.Name == S.selectedStyle then
+                    selected = tool
+                    break
+                end
+            end
+        end
+        if selected then break end
+    end
+
+    -- Se a Tool anterior nao existir (respawn, troca), achar outro melee.
+    if not selected then
+        for _, container in ipairs({character, backpack}) do
+            if container then
+                for _, tool in ipairs(container:GetChildren()) do
+                    if isMelee(tool) then
+                        selected = tool
+                        break
+                    end
+                end
+            end
+            if selected then break end
+        end
+    end
+
+    if not selected then
+        if os.clock() - lastMissingStyleLog > 8 then
+            lastMissingStyleLog = os.clock()
+            warn("[HEX V4.1] Nao foi encontrado estilo de luta no personagem/Backpack")
+        end
+        return nil
+    end
+
+    if selected.Parent ~= character then
+        -- Clique na hotbar pode desequipar a luta.
+        -- O controlador tenta reequipar sem reiniciar o farm.
+        if os.clock() - lastEquipAttempt >= 0.4 then
+            lastEquipAttempt = os.clock()
+            local ok, err = pcall(function()
+                humanoid:EquipTool(selected)
+            end)
+            if not ok then
+                warn("[HEX V4.1] Falha ao reequipar:", err)
+            end
+        end
+    end
+
+    if selected.Parent ~= character then
+        return nil
+    end
+
+    S.selectedStyle = selected.Name
+    return selected
+end
+
+-- A tecla 1 so atualiza o estilo caso ele seja realmente melee.
+connect(UIS.InputBegan, function(input, processed)
+    if processed or input.KeyCode ~= Enum.KeyCode.One then
+        return
+    end
+
+    task.delay(0.3, function()
+        if not S.alive then return end
+        local character = player.Character
+        local tool = character
+            and character:FindFirstChildWhichIsA("Tool")
+
+        if isMelee(tool) then
+            S.selectedStyle = tool.Name
+        end
+    end)
+end)
+
+-- =========================================
+-- CAMERA
+-- =========================================
+
+local function restoreCamera()
+    local saved = S.camera
+    S.camera = nil
+
+    if not saved then return end
+
+    pcall(function()
+        saved.camera.CameraType = saved.kind
+
+        if saved.subject and saved.subject.Parent then
+            saved.camera.CameraSubject = saved.subject
+        end
+
+        if saved.kind == Enum.CameraType.Scriptable then
+            saved.camera.CFrame = saved.cframe
+        end
+    end)
+end
+
+local function aimCamera(root, target)
+    local camera = Workspace.CurrentCamera
+    if not camera then return end
+
+    local now = os.clock()
+    if now - S.lastCameraAim < C.CameraAimInterval then return end
+    S.lastCameraAim = now
+
+    if not S.camera then
+        S.camera = {
+            camera = camera,
+            kind = camera.CameraType,
+            subject = camera.CameraSubject,
+            cframe = camera.CFrame,
+        }
+    end
+
+    local delta = target - root.Position
+    local flat = Vector3.new(delta.X, 0, delta.Z)
+
+    if flat.Magnitude < 0.1 then return end
+
+    camera.CameraType = Enum.CameraType.Scriptable
+
+    camera.CFrame = CFrame.lookAt(
+        root.Position - flat.Unit * 5
+            + Vector3.new(0, 3, 0),
+        target
+    )
+end
+
+-- =========================================
+-- COMBATE
+-- =========================================
+
+local function enemyAlive(model)
+    if not model or not model.Parent then
+        return false
+    end
+
+    local humanoid = model:FindFirstChildOfClass("Humanoid")
+
+    return humanoid ~= nil and humanoid.Health > 0
+end
+
+local function pumpkinPart(model)
+    if not model or not model.Parent then return nil end
+
+    local state = model:GetAttribute("PumpkinState")
+
+    if state and state ~= "Idle" then
+        return nil
+    end
+
+    for _, part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart")
+            and CollectionService:HasTag(
+                part, "M1HitRegistry"
+            ) then
+            return part
+        end
+    end
+
+    return model:FindFirstChild("RootPart", true)
+        or model.PrimaryPart
+        or model:FindFirstChildWhichIsA(
+            "BasePart", true
+        )
+end
+
+local function attackMethods(tool)
+    local methods = {}
+
+    if virtualInput then
+        table.insert(methods, {
+            name = "VirtualInput",
+            fire = function()
+                local camera = Workspace.CurrentCamera
+                local center = camera.ViewportSize / 2
+
+                virtualInput:SendMouseButton(
+                    center,
+                    Enum.UserInputType.MouseButton1,
+                    true, 0
+                )
+
+                task.wait(C.ClickHold)
+
+                virtualInput:SendMouseButton(
+                    center,
+                    Enum.UserInputType.MouseButton1,
+                    false, 0
+                )
+            end,
+        })
+    end
+
+    if virtualUser then
+        table.insert(methods, {
+            name = "VirtualUser",
+            fire = function()
+                local camera = Workspace.CurrentCamera
+                local center = camera.ViewportSize / 2
+
+                virtualUser:Button1Down(center, camera.CFrame)
+                task.wait(C.ClickHold)
+                virtualUser:Button1Up(center, camera.CFrame)
+            end,
+        })
+    end
+
+    table.insert(methods, {
+        name = "Tool",
+        fire = function()
+            if tool.Parent and tool.Enabled then
+                tool:Activate()
+                task.wait(C.ClickHold)
+                tool:Deactivate()
+            end
+        end,
+    })
+
+    return methods
+end
+
+local function combatTick(kind, model)
+    local _, humanoid, root = characterParts()
+    if not root or not model then return false end
+
+    local part, targetHumanoid
+
+    if kind == "Pumpkin" then
+        part = pumpkinPart(model)
+    else
+        if not enemyAlive(model) then
+            S.combat = nil
+            return false
+        end
+
+        targetHumanoid = model:FindFirstChildOfClass("Humanoid")
+
+        part = model:FindFirstChild("HumanoidRootPart")
+            or model.PrimaryPart
+            or model:FindFirstChildWhichIsA(
+                "BasePart", true
+            )
+    end
+
+    if not part then return false end
+
+    local pos = part.Position
+
+    if (root.Position - pos).Magnitude > C.AttackRange then
+        restoreCamera()
+        -- Nao esquecer o metodo de M1 quando um clique ou uma
+        -- colisao deslocar o personagem brevemente.
+        if S.combat and S.combat.model == model then
+            S.combat.lastProgress = os.clock()
+        end
+
+        travelTo(
+            model,
+            pos,
+            C.AttackRange - 0.4
+        )
+
+        updateUI("Voando: " .. model.Name)
+        return true
+    end
+
+    S.travel = nil
+
+    setFlight(
+        root,
+        humanoid,
+        approachPoint(root.Position, pos, C.AttackHeight),
+        pos
+    )
+
+    aimCamera(root, pos)
+
+    local value
+
+    if kind == "Pumpkin" then
+        value = model:GetAttribute("PumpkinHits")
+    else
+        value = targetHumanoid.Health
+    end
+
+    local state = S.combat
+
+    if not state or state.model ~= model or state.kind ~= kind then
+        state = {
+            model = model,
+            kind = kind,
+            value = value,
+            lastProgress = os.clock(),
+            lastAttack = 0,
+            index = 1,
+            methodCycles = 0,
+        }
+
+        S.combat = state
+    end
+
+    if type(value) == "number"
+        and type(state.value) == "number" then
+
+        local changed
+
+        if kind == "Pumpkin" then
+            changed = value > state.value
+        else
+            changed = value < state.value
+        end
+
+        if changed then
+            state.lastProgress = os.clock()
+
+            if state.methods and state.methods[state.index] then
+                S.bestMethod = state.methods[state.index].name
+            end
+        end
+    end
+
+    state.value = value
+
+    local tool = getMelee()
+
+    if not tool then
+        updateUI("Equipe seu estilo de luta no slot 1.")
+        return true
+    end
+
+    if state.tool ~= tool or not state.methods then
+        state.tool = tool
+        -- Mantida a MESMA ordem de ataques da V4 que ja funcionou.
+        state.methods = attackMethods(tool)
+        state.index = 1
+        state.lastProgress = os.clock()
+
+        for i, method in ipairs(state.methods) do
+            if method.name == S.bestMethod then
+                state.index = i
+                break
+            end
+        end
+    end
+
+    if os.clock() - state.lastProgress >= C.MethodTimeout then
+        state.index = state.index % #state.methods + 1
+        state.methodCycles += 1
+        state.lastProgress = os.clock()
+        pcall(function() tool:Deactivate() end)
+
+        -- Depois de uma volta completa sem dano, verificar se
+        -- um clique manual desequipou ou desativou a Tool.
+        if state.methodCycles % #state.methods == 0 then
+            local equipped = player.Character
+                and player.Character:FindFirstChildWhichIsA("Tool")
+            if equipped ~= tool then
+                lastEquipAttempt = 0
+                state.tool = nil
+            end
+        end
+    end
+
+    if os.clock() - state.lastAttack < C.AttackInterval then
+        return true
+    end
+
+    state.lastAttack = os.clock()
+
+    local method = state.methods[state.index]
+
+    local ok, err = pcall(method.fire)
+    if not ok then
+        warn("[HEX V4.1] M1 falhou:", method.name, err)
+        state.index = state.index % #state.methods + 1
+        state.lastProgress = os.clock()
+    end
+
+    updateUI("Atacando: " .. model.Name .. " / " .. method.name)
+
+    return true
+end
+
+-- =========================================
+-- BOSSES
+-- =========================================
+
+-- Bosses sao procurados no maximo uma vez por intervalo para
+-- cada tipo; o cache e invalidado quando morrem/desaparecem.
+local bossCache = {}
+local function findBoss(first, second)
+    local key = first .. ":" .. tostring(second or "")
+    local cached = bossCache[key]
+    local now = os.clock()
+    if cached and now - cached.checkedAt < C.BossScanInterval then
+        if cached.model and enemyAlive(cached.model) then
+            return cached.model
+        end
+        return nil
+    end
+
+    local _, _, root = characterParts()
+    local chosen, closest = nil, math.huge
+    -- Nunca varrer o mapa completo a cada frame.
+    -- Se nao houver pasta Enemies, usar Workspace como fallback.
+    local searchRoot = Workspace:FindFirstChild("Enemies") or Workspace
+
+    for _, model in ipairs(searchRoot:GetDescendants()) do
+        if model:IsA("Model") then
+            local humanoid = model:FindFirstChildOfClass("Humanoid")
+            if humanoid and humanoid.Health > 0 then
+                local display = (model.Name .. " " .. humanoid.DisplayName):lower()
+                if display:find(first, 1, true)
+                    and (not second or display:find(second, 1, true)) then
+                    local pos = positionOf(model)
+                    if pos then
+                        local distance = root
+                            and (pos - root.Position).Magnitude or 0
+                        if distance < closest then
+                            closest, chosen = distance, model
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    bossCache[key] = { checkedAt = now, model = chosen }
+    return chosen
+end
+
+local function hellfireBoss()
+    if S.raidBoss and enemyAlive(S.raidBoss) then
+        return S.raidBoss
+    end
+
+    if os.clock() - S.lastBossScan < C.ScanInterval then
+        return nil
+    end
+
+    S.lastBossScan = os.clock()
+    S.raidBoss = findBoss("hellfire", "gas")
+
+    return S.raidBoss
+end
+
+-- =========================================
+-- PORTAS
+-- =========================================
+
+local function scanDoors()
+    if os.clock() - S.lastDoorScan < C.DoorScanInterval then
+        return S.doorCache
+    end
+
+    S.lastDoorScan = os.clock()
+
+    local doors = {}
+    local map = Workspace:FindFirstChild("Map") or Workspace
+
+    for _, object in ipairs(map:GetDescendants()) do
+        if object.Name == "HalloweenDoor" then
+            local prompt = object:FindFirstChild(
+                "ProximityPrompt", true
+            )
+
+            if prompt and prompt.Enabled then
+                local pos = positionOf(prompt.Parent)
+
+                if pos then
+                    table.insert(doors, {
+                        model = object,
+                        prompt = prompt,
+                        position = pos,
+                    })
+                end
+            end
+        end
+    end
+
+    S.doorCache = doors
+
+    return doors
+end
+
+local function nearestDoor(position)
+    local chosen
+    local closest = C.SearchRadius
+
+    for _, door in ipairs(scanDoors()) do
+        if door.model.Parent
+            and door.prompt.Parent
+            and door.prompt.Enabled
+            and (doorCooldowns[door.model] or 0) <= os.clock() then
+
+            local dist = (
+                position - door.position
+            ).Magnitude
+
+            if dist < closest then
+                chosen = door
+                closest = dist
+            end
+        end
+    end
+
+    return chosen
+end
+
+-- =========================================
+-- DETECCAO DE OPCOES DO NPC
+-- =========================================
+
+local POSITIVE = {
+    "trickortreat",
+    "treat",
+    "candy",
+    "doce",
+    "aceitar",
+    "accept",
+    "continuar",
+    "continue",
+    "yes",
+    "sim",
+    "quest",
+    "mission",
+    "missao",
+    "help",
+    "ajudar",
+    "receber",
+    "claim",
+    "quero",
+    "dobrar",
+    "double",
+}
+
+local NEGATIVE = {
+    "deixapra",
+    "deixapralá",
+    "cancel",
+    "cancelar",
+    "decline",
+    "recusar",
+    "refuse",
+    "nevermind",
+    "goodbye",
+    "leave",
+    "sair",
+    "desistir",
+    "naoquero",
+    "nãoquero",
+    "nope",
+    "notinterested",
+}
+
+local function normalize(text)
+    return tostring(text or "")
+        :lower()
+        :gsub("[%s%p]", "")
+end
+
+local function visible(object)
+    local current = object
+
+    while current do
+        if current:IsA("GuiObject")
+            and not current.Visible then
+
+            return false
+        end
+
+        if current:IsA("ScreenGui")
+            and not current.Enabled then
+
+            return false
+        end
+
+        current = current.Parent
+    end
+
+    return true
+end
+
+local function optionNumber(button)
+    if button.Name ~= "button" then
+        return nil
+    end
+
+    local parent = button.Parent
+
+    for _ = 1, 5 do
+        if not parent then break end
+
+        local number = parent.Name:match(
+            "option(%d+)"
+        )
+
+        if number then
+            return tonumber(number)
+        end
+
+        parent = parent.Parent
+    end
+
+    return nil
+end
+
+-- Captura textos de opcoes, inclusive labels
+-- construidos por letras separadas.
+
+local function getTextFrom(container)
+    if not container then return "" end
+
+    local fragments = {}
+
+    for _, object in ipairs(container:GetDescendants()) do
+        if (object:IsA("TextLabel")
+            or object:IsA("TextButton"))
+            and object.Text ~= ""
+            and object.Name ~= "outline" then
+
+            table.insert(fragments, {
+                text = object.Text,
+                x = object.AbsolutePosition.X,
+                y = object.AbsolutePosition.Y,
+            })
+        end
+    end
+
+    table.sort(fragments, function(a, b)
+        if math.abs(a.y - b.y) > 4 then
+            return a.y < b.y
+        end
+
+        return a.x < b.x
+    end)
+
+    local texts = {}
+
+    for _, fragment in ipairs(fragments) do
+        table.insert(texts, fragment.text)
+    end
+
+    return table.concat(texts, " ")
+end
+
+local function scoreOption(text, index)
+    local normalized = normalize(text)
+    local score = index == 1 and 2 or 0
+
+    for _, word in ipairs(POSITIVE) do
+        if normalized:find(normalize(word), 1, true) then
+            score += 25
+        end
+    end
+
+    for _, word in ipairs(NEGATIVE) do
+        if normalized:find(normalize(word), 1, true) then
+            score -= 200
+        end
+    end
+
+    return score
+end
+
+local function findDialogue()
+    local root = playerGui:FindFirstChild("DialogueGui")
+    if not root then return nil end
+
+    local options = {}
+    local pages = {}
+
+    for _, object in ipairs(root:GetDescendants()) do
+        if object:IsA("GuiButton")
+            and visible(object)
+            and object.AbsoluteSize.X > 5
+            and object.AbsoluteSize.Y > 5 then
+
+            if object.Name == "pageButton" then
+                table.insert(pages, object)
+
+            elseif object.Name == "button" then
+                local index = optionNumber(object)
+
+                if index then
+                    table.insert(options, {
+                        index = index,
+                        button = object,
+                        text = getTextFrom(object.Parent),
+                    })
+                end
+            end
+        end
+    end
+
+    table.sort(options, function(a, b)
+        return a.index < b.index
+    end)
+
+    local selected
+    local bestScore = -math.huge
+
+    for _, option in ipairs(options) do
+        local score = scoreOption(
+            option.text,
+            option.index
+        )
+
+        if score > bestScore then
+            selected = option
+            bestScore = score
+        end
+    end
+
+    -- Nunca selecionar uma resposta reconhecida
+    -- como cancelamento ou recusa.
+
+    if selected and bestScore >= 0 then
+        return {
+            button = selected.button,
+            action = "RESPOSTA " .. selected.index,
+            text = selected.text,
+            kind = "option",
+        }
+    end
+
+    if #options > 0 then
+        return {
+            blocked = true,
+            action = "TODAS AS OPCOES PARECEM RECUSAS",
+        }
+    end
+
+    if pages[1] then
+        return {
+            button = pages[1],
+            action = "AVANCAR CONVERSA",
+            text = "",
+            kind = "page",
+        }
+    end
+
+    return nil
+end
+
+-- A assinatura muda quando a interface
+-- recria os botoes ou o texto muda.
+-- Isso permite detectar perguntas consecutivas.
+
+local function dialogueSignature()
+    local root = playerGui:FindFirstChild("DialogueGui")
+    if not root then return "NONE" end
+
+    local parts = {}
+
+    for _, object in ipairs(root:GetDescendants()) do
+        if object:IsA("GuiButton")
+            and visible(object) then
+
+            local index = optionNumber(object)
+
+            if index then
+                table.insert(
+                    parts,
+                    "O" .. index .. ":"
+                        .. tostring(object)
+                        .. ":"
+                        .. normalize(getTextFrom(object.Parent))
+                )
+
+            elseif object.Name == "pageButton" then
+                table.insert(
+                    parts,
+                    "P:" .. tostring(object)
+                )
+            end
+        end
+    end
+
+    table.sort(parts)
+    return table.concat(parts, "|")
+end
+
+-- =========================================
+-- CLIQUES DE DIALOGO
+-- =========================================
+
+local function clickDialogue(button, method)
+    if not button or not button.Parent then
+        return false
+    end
+
+    local point = button.AbsolutePosition
+        + button.AbsoluteSize / 2
+
+    local activated = false
+
+    local connection = button.Activated:Connect(function()
+        activated = true
+    end)
+
+    local ok = false
+
+    if method == 1 then
+        -- Alguns executores oferecem esta funcao.
+        if type(firesignal) == "function" then
+            ok = pcall(function()
+                firesignal(button.Activated, nil, 1)
+                firesignal(button.MouseButton1Click)
+            end)
+        end
+
+    elseif method == 2 and virtualInput then
+        ok = pcall(function()
+            virtualInput:SendMousePosition(point)
+
+            virtualInput:SendMouseButton(
+                point,
+                Enum.UserInputType.MouseButton1,
+                true,
+                0
+            )
+
+            task.wait(0.05)
+
+            virtualInput:SendMouseButton(
+                point,
+                Enum.UserInputType.MouseButton1,
+                false,
+                0
+            )
+        end)
+
+    elseif method == 3 and virtualUser then
+        ok = pcall(function()
+            local camera = Workspace.CurrentCamera
+
+            virtualUser:Button1Down(
+                point,
+                camera.CFrame
+            )
+
+            task.wait(0.05)
+
+            virtualUser:Button1Up(
+                point,
+                camera.CFrame
+            )
+        end)
+
+    elseif method == 4 and virtualInputManager then
+        ok = pcall(function()
+            virtualInputManager:SendMouseButtonEvent(
+                point.X,
+                point.Y,
+                0,
+                true,
+                game,
+                0
+            )
+
+            task.wait(0.05)
+
+            virtualInputManager:SendMouseButtonEvent(
+                point.X,
+                point.Y,
+                0,
+                false,
+                game,
+                0
+            )
+        end)
+    end
+
+    task.wait(0.12)
+    connection:Disconnect()
+
+    return ok, activated
+end
+
+-- =========================================
+-- MOTOR DE PERGUNTAS CONSECUTIVAS
+-- =========================================
+
+local function dialogueTick(encounter)
+    local action = findDialogue()
+
+    if not action then
+        encounter.dialogue = nil
+        return false
+    end
+
+    if action.blocked then
+        dialogueStatus("RESPOSTA SEGURA NAO IDENTIFICADA")
+        return true
+    end
+
+    local now = os.clock()
+    local signature = dialogueSignature()
+
+    local d = encounter.dialogue
+
+    if not d then
+        d = {
+            signature = signature,
+            stableSince = now,
+            awaiting = false,
+            pendingAt = 0,
+            lastClick = 0,
+            method = 1,
+            attempts = 0,
+            steps = 0,
+        }
+
+        encounter.dialogue = d
+
+        dialogueStatus("LENDO A PERGUNTA...")
+        return true
+    end
+
+    -- Uma nova pergunta ou pagina apareceu.
+    if signature ~= d.signature then
+        d.signature = signature
+        d.stableSince = now
+        d.awaiting = false
+        d.attempts = 0
+        d.method = 1
+        d.steps += 1
+
+        S.dialogueSteps += 1
+
+        encounter.lastActivity = now
+
+        dialogueStatus(
+            "NOVA PERGUNTA " .. d.steps
+        )
+
+        return true
+    end
+
+    -- Esperar o texto e as respostas terminarem
+    -- de aparecer na interface.
+    if now - d.stableSince < C.DialogueStableTime then
+        dialogueStatus("AGUARDANDO TEXTO COMPLETO...")
+        return true
+    end
+
+    -- Depois de clicar, aguardar o NPC responder.
+    if d.awaiting then
+        if now - d.pendingAt < C.DialogueResponseWait then
+            dialogueStatus(
+                "AGUARDANDO PROXIMA PERGUNTA..."
+            )
+            return true
+        end
+
+        d.awaiting = false
+    end
+
+    if d.steps >= C.MaxDialogueSteps then
+        dialogueStatus("LIMITE DE PERGUNTAS")
+        return true
+    end
+
+    if d.attempts >= C.MaxClicksPerQuestion then
+        dialogueStatus(
+            "SEM CONFIRMACAO: VERIFICAR CONVERSA"
+        )
+        return true
+    end
+
+    if now - d.lastClick < C.DialogueRetryTime then
+        return true
+    end
+
+    d.lastClick = now
+    d.attempts += 1
+
+    local currentMethod = d.method
+    local attempted, activated = clickDialogue(
+        action.button,
+        currentMethod
+    )
+
+    local nextSignature = dialogueSignature()
+
+    if nextSignature ~= signature
+        or not action.button.Parent then
+
+        d.signature = nextSignature
+        d.stableSince = os.clock()
+        d.awaiting = false
+        d.attempts = 0
+        d.method = 1
+        d.steps += 1
+
+        S.dialogueSteps += 1
+
+        encounter.lastActivity = os.clock()
+
+        dialogueStatus(
+            "ETAPA " .. d.steps .. " CONCLUIDA"
+        )
+    else
+        -- O clique pode ter sido recebido, mas
+        -- o NPC ainda nao respondeu.
+        d.awaiting = true
+        d.pendingAt = os.clock()
+
+        d.method = d.method % 4 + 1
+
+        dialogueStatus(
+            action.action
+                .. " | AGUARDANDO RESPOSTA"
+        )
+
+        if not attempted then
+            warn(
+                "[HEX THEUS V4] Metodo indisponivel:",
+                currentMethod
+            )
+        end
+    end
+
+    return true
+end
+
+-- =========================================
+-- ENCONTROS E MONSTROS
+-- =========================================
+
+local function startEncounter(door)
+    local encounter = {
+        door = door,
+        phase = "travel",
+
+        started = os.clock(),
+        lastActivity = os.clock(),
+        lastSpawn = os.clock(),
+        lastReward = 0,
+
+        attempts = 0,
+        lastAttempt = 0,
+        triggered = false,
+        activatedAt = 0,
+
+        candy = 0,
+        empty = false,
+        busy = false,
+        monstersRequired = false,
+
+        enemies = {},
+        baseline = {},
+        dialogue = nil,
+    }
+
+    local folder = Workspace:FindFirstChild("Enemies")
+
+    if folder then
+        for _, model in ipairs(folder:GetDescendants()) do
+            if model:IsA("Model")
+                and model:FindFirstChildOfClass("Humanoid") then
+
+                encounter.baseline[model] = true
+            end
+        end
+    end
+
+    S.encounter = encounter
+    S.travel = nil
+    S.combat = nil
+end
+
+local function registerEnemy(model, encounter)
+    encounter = encounter or S.encounter
+
+    if not encounter or not encounter.triggered
+        or not enemyAlive(model) or encounter.baseline[model] then
+        return
+    end
+
+    -- Atribuir somente novos NPCs surgidos perto da nossa porta.
+    -- Nao e uma prova perfeita de propriedade no cliente.
+    local lastOurAction = math.max(
+        encounter.activatedAt or 0,
+        encounter.lastActivity or 0
+    )
+    if os.clock() - lastOurAction > C.DoorEnemySpawnWindow then
+        return
+    end
+
+    local folder = Workspace:FindFirstChild("Enemies")
+
+    if not folder or not model:IsDescendantOf(folder) then
+        return
+    end
+
+    local pos = positionOf(model)
+    if not pos then return end
+
+    local owner = model:GetAttribute("OwnerUserId")
+        or model:GetAttribute("Owner")
+    if owner ~= nil and tostring(owner) ~= tostring(player.UserId)
+        and tostring(owner):lower() ~= player.Name:lower() then
+        return
+    end
+    if owner == nil then
+        for _, otherPlayer in ipairs(Players:GetPlayers()) do
+            if otherPlayer ~= player then
+                local otherRoot = otherPlayer.Character
+                    and otherPlayer.Character:FindFirstChild("HumanoidRootPart")
+                if otherRoot and (otherRoot.Position - pos).Magnitude < 25 then
+                    return
+                end
+            end
+        end
+    end
+
+    if (pos - encounter.door.position).Magnitude
+        > C.DoorEnemyRadius then
+
+        return
+    end
+
+    encounter.enemies[model] = true
+    pendingEnemies[model] = true
+
+    encounter.lastSpawn = os.clock()
+    encounter.lastActivity = os.clock()
+end
+
+connect(Workspace.DescendantAdded, function(object)
+    if not S.alive then return end
+
+    if object:IsA("Humanoid") then
+        local model = object.Parent
+
+        task.delay(0.25, function()
+            if S.alive and model then
+                registerEnemy(model)
+            end
+        end)
+    end
+end)
+
+local function scanEncounterEnemies(encounter)
+    local now = os.clock()
+    if now - (encounter.lastEnemyScan or 0) < C.EnemyScanInterval then
+        return
+    end
+    encounter.lastEnemyScan = now
+    local folder = Workspace:FindFirstChild("Enemies")
+    if not folder then return end
+
+    for _, model in ipairs(folder:GetDescendants()) do
+        if model:IsA("Model") and enemyAlive(model) then
+            if not encounter.baseline[model]
+                or encounter.monstersRequired
+                or encounter.busy then
+
+                registerEnemy(model, encounter)
+            end
+        end
+    end
+end
+
+local function nearestPending(position)
+    local chosen
+    local nearest = math.huge
+
+    for model in pairs(pendingEnemies) do
+        if enemyAlive(model) then
+            local pos = positionOf(model)
+
+            if pos then
+                local dist = (pos - position).Magnitude
+
+                if dist < nearest then
+                    chosen = model
+                    nearest = dist
+                end
+            end
+        else
+            pendingEnemies[model] = nil
+        end
+    end
+
+    return chosen
+end
+
+local function finishEncounter(message)
+    local encounter = S.encounter
+    if not encounter then return end
+
+    doorCooldowns[encounter.door.model] =
+        os.clock() + C.DoorCooldown
+
+    S.completedDoors += 1
+    -- Pendentes pertencem somente a porta concluida.
+    table.clear(pendingEnemies)
+    S.encounter = nil
+    S.travel = nil
+    S.combat = nil
+
+    restoreCamera()
+
+    dialogueStatus("CONVERSA FINALIZADA")
+    updateUI(message, true)
+end
+
+connect(PPS.PromptTriggered, function(prompt)
+    local encounter = S.encounter
+
+    if encounter and prompt == encounter.door.prompt then
+        encounter.triggered = true
+        encounter.activatedAt = os.clock()
+        encounter.lastActivity = os.clock()
+    end
+end)
+
+local function triggerPrompt(prompt)
+    if not prompt or not prompt.Parent
+        or not prompt.Enabled then
+
+        return false
+    end
+
+    return pcall(function()
+        prompt:InputHoldBegin()
+
+        task.wait(math.max(
+            0.08,
+            prompt.HoldDuration + 0.05
+        ))
+
+        prompt:InputHoldEnd()
+    end)
+end
+
+-- =========================================
+-- NOTIFICACOES
+-- =========================================
+
+local function inspectNotification(text)
+    if not S.alive or text == "" then return end
+
+    local now = os.clock()
+    local lower = text:lower()
+
+    if S.lastNotice == text
+        and now - S.lastNoticeAt < 0.8 then
+
+        return
+    end
+
+    S.lastNotice = text
+    S.lastNoticeAt = now
+
+    local encounter = S.encounter
+
+    if lower:find("obtained", 1, true)
+        and lower:find("candy corn", 1, true) then
+
+        local amount = tonumber(
+            text:match("%((%d+)x%)")
+        )
+
+        if amount then
+            S.candy += amount
+
+            if encounter then
+                encounter.candy += amount
+                encounter.lastReward = now
+                encounter.lastActivity = now
+            end
+        end
+
+    elseif encounter then
+        if lower:find("nobody is home", 1, true) then
+            encounter.empty = true
+        elseif lower:find("still busy", 1, true) then
+            encounter.busy = true
+        elseif lower:find("defeat them first", 1, true) then
+            encounter.monstersRequired = true
+        end
+    end
+end
+
+local function watchNotification(object)
+    if watchedNotifications[object] then return end
+    if not object:IsA("TextLabel") then return end
+    if object:IsDescendantOf(gui) then return end
+
+    if not object:GetFullName():lower()
+        :find("notification", 1, true) then
+        return
+    end
+
+    watchedNotifications[object] = true
+
+    connect(
+        object:GetPropertyChangedSignal("Text"),
+        function()
+            inspectNotification(object.Text)
+        end
+    )
+end
+
+for _, object in ipairs(playerGui:GetDescendants()) do
+    watchNotification(object)
+end
+
+connect(playerGui.DescendantAdded, function(object)
+    watchNotification(object)
+end)
+
+-- =========================================
+-- AUTO GACHA + AUTO STORE - REMOTES OBSERVADOS
+-- =========================================
+
+-- Gacha: RF/GachaNetworkRF({Context="Purchase", BoxName="Halloween26Gacha"})
+-- Store: CommF_:InvokeServer("StoreFruit", "Venom-Venom", physicalTool)
+-- IDs de outras frutas seguem a convencao do standalone, que pode variar.
+
+local function getGachaRemote()
+    local modules = ReplicatedStorage:FindFirstChild("Modules")
+    local net = modules and modules:FindFirstChild("Net")
+    local rf = net and net:FindFirstChild("RF/GachaNetworkRF")
+    return rf and rf:IsA("RemoteFunction") and rf or nil
+end
+
+local function getStoreRemote()
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    local rf = remotes and remotes:FindFirstChild("CommF_")
+    return rf and rf:IsA("RemoteFunction") and rf or nil
+end
+
+local function readGachaLimit()
+    local input = tonumber(gachaLimitInput.Text)
+    local limit = math.clamp(math.floor(input or 5), 1, 50)
+    gachaLimitInput.Text = tostring(limit)
+    return limit
+end
+
+local function purchaseGacha()
+    if not S.alive or S.gachaBusy then return end
+    local rf = getGachaRemote()
+    if not rf then
+        S.gachaStatus = "Remote nao carregado"
+        updateUI(nil, true)
+        return
+    end
+
+    S.gachaBusy = true
+    S.gachaAttempts += 1
+    S.gachaRoundAttempts += 1
+    S.gachaStatus = "Solicitando giro " .. S.gachaAttempts .. "..."
+    updateUI(nil, true)
+
+    local ok, result = pcall(function()
+        return rf:InvokeServer({
+            Context = "Purchase",
+            BoxName = "Halloween26Gacha",
+        })
+    end)
+
+    if ok then
+        S.gachaStatus = "Giro solicitado (confira a recompensa)"
+    else
+        S.gachaStatus = "Erro ao solicitar giro"
+        warn("[HEX V4.3 GACHA]", result)
+    end
+    S.gachaBusy = false
+    updateUI(nil, true)
+end
+
+local function physicalFruit(tool)
+    if not tool or not tool:IsA("Tool") then return nil end
+    local base = tool.Name:match("^(.+) Fruit$")
+    if not base or base == "Blox" then return nil end
+    return base
+end
+
+local function isToolPresent(tool)
+    local backpack = player:FindFirstChildOfClass("Backpack")
+    local character = player.Character
+    return (backpack and tool.Parent == backpack)
+        or (character and tool.Parent == character)
+end
+
+local function findPhysicalFruit()
+    for _, container in ipairs({
+        player:FindFirstChildOfClass("Backpack"),
+        player.Character,
+    }) do
+        if container then
+            for _, tool in ipairs(container:GetChildren()) do
+                local base = physicalFruit(tool)
+                if base and (storeRetryAt[tool] or 0) <= os.clock() then
+                    return tool, base
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function storePhysicalFruit(tool, base)
+    if not S.alive or not S.autoStore or S.storeBusy then return end
+    local rf = getStoreRemote()
+    if not rf then
+        S.storeStatus = "Remote CommF_ nao carregado"
+        updateUI(nil, true)
+        return
+    end
+
+    local character, humanoid = characterParts()
+    if not character or not isToolPresent(tool) then return end
+
+    S.storeBusy = true -- pausa combate antes de equipar fruta
+    task.wait(0.12) -- permite encerrar o M1 ja iniciado
+    if not S.alive or not S.autoStore or not isToolPresent(tool) then
+        S.storeBusy = false
+        return
+    end
+
+    character, humanoid = characterParts()
+    if not character then
+        S.storeBusy = false
+        return
+    end
+
+    local previous = character:FindFirstChildWhichIsA("Tool")
+    local previousMeleeName = S.selectedStyle
+    S.storeStatus = "Equipando " .. tool.Name
+    updateUI(nil, true)
+
+    local equipped = pcall(function()
+        humanoid:EquipTool(tool)
+    end)
+    task.wait(0.3)
+
+    if not S.alive or not S.autoStore then
+        if previous and previous ~= tool and previous.Parent
+            and humanoid.Parent and humanoid.Health > 0 then
+            pcall(function() humanoid:EquipTool(previous) end)
+        end
+        S.storeBusy = false
+        return
+    end
+
+    if not equipped or tool.Parent ~= character then
+        storeRetryAt[tool] = os.clock() + C.StoreRetrySeconds
+        S.storeStatus = "Falha ao equipar " .. tool.Name
+        if previous and previous ~= tool and previous.Parent then
+            pcall(function() humanoid:EquipTool(previous) end)
+        end
+        S.storeBusy = false
+        updateUI(nil, true)
+        return
+    end
+
+    -- Preserva a logica do Auto Store standalone testado pelo usuario.
+    local fruitId = base .. "-" .. base
+    S.storeStatus = "Guardando " .. tool.Name
+    updateUI(nil, true)
+
+    local success, response = pcall(function()
+        return rf:InvokeServer("StoreFruit", fruitId, tool)
+    end)
+    if not success then
+        warn("[HEX V4.3 STORE]", response)
+    end
+
+    -- Desaparecimento do Backpack/Character e evidencia de que a Tool
+    -- saiu de posse, mas a confirmacao final e a notificacao do jogo.
+    local deadline = os.clock() + 2.5
+    while S.alive and isToolPresent(tool) and os.clock() < deadline do
+        task.wait(0.1)
+    end
+
+    if not isToolPresent(tool) then
+        S.storedFruits += 1
+        S.storeStatus = "Guardada: " .. tool.Name
+    else
+        storeRetryAt[tool] = os.clock() + C.StoreRetrySeconds
+        S.storeStatus = "Nao confirmado: " .. tool.Name
+    end
+
+    if previousMeleeName then S.selectedStyle = previousMeleeName end
+    if previous and previous ~= tool and previous.Parent
+        and humanoid.Parent and humanoid.Health > 0 then
+        pcall(function() humanoid:EquipTool(previous) end)
+    elseif previousMeleeName and humanoid.Parent
+        and humanoid.Health > 0 then
+        -- A V4.1 vai procurar esse estilo quando o combate retomar.
+        lastEquipAttempt = 0
+    end
+
+    -- Recria os metodos do M1 apos o Store para impedir Tool antiga presa.
+    if S.combat then
+        S.combat.tool = nil
+        S.combat.methods = nil
+        S.combat.lastProgress = os.clock()
+    end
+    S.storePauseUntil = os.clock() + 0.18
+    S.storeBusy = false
+    updateUI(nil, true)
+end
+
+local function safeStoreTick()
+    if not S.alive or not S.autoStore or S.storeBusy then return end
+    if S.doors and S.encounter and findDialogue() then return end
+    local tool, base = findPhysicalFruit()
+    if not tool then return end
+
+    local ok, err = xpcall(function()
+        storePhysicalFruit(tool, base)
+    end, function(e) return tostring(e) end)
+    if not ok then
+        warn("[HEX V4.3 STORE RECUPERAVEL]", err)
+        S.storeStatus = "Erro recuperavel: ver console"
+        storeRetryAt[tool] = os.clock() + C.StoreRetrySeconds
+        S.storeBusy = false
+    end
+end
+
+task.spawn(function()
+    while S.alive do
+        if S.autoGacha and not S.gachaBusy then
+            if S.gachaRoundAttempts >= S.gachaLimit then
+                S.autoGacha = false
+                S.gachaStatus = "Limite atingido: " .. S.gachaLimit
+                updateUI(nil, true)
+            elseif os.clock() >= S.gachaNextAt then
+                purchaseGacha()
+                S.gachaNextAt = os.clock() + C.GachaInterval
+            end
+        end
+        task.wait(0.3)
+    end
+end)
+
+task.spawn(function()
+    while S.alive do
+        if S.autoStore and not S.storeBusy then
+            safeStoreTick()
+        end
+        task.wait(0.7)
+    end
+end)
+
+-- =========================================
+-- EXECUTAR ENCONTRO
+-- =========================================
+
+local function encounterTick()
+    local encounter = S.encounter
+    if not encounter then return end
+
+    local _, _, root = characterParts()
+    if not root then return end
+
+    local door = encounter.door
+    local now = os.clock()
+
+    if not door.model.Parent then
+        finishEncounter("Porta desapareceu.")
+        return
+    end
+
+    if encounter.phase == "travel" then
+        local arrived = travelTo(
+            door.model,
+            door.position,
+            math.max(
+                2.5,
+                math.min(
+                    4,
+                    door.prompt.MaxActivationDistance - 0.8
+                )
+            )
+        )
+
+        if arrived then
+            encounter.phase = "interact"
+            encounter.lastAttempt = 0
+            encounter.lastActivity = now
+            restoreCamera()
+        else
+            updateUI("Voando ate a porta...")
+        end
+
+        return
+    end
+
+    if encounter.phase == "interact" then
+        if encounter.triggered
+            or findDialogue()
+            or next(encounter.enemies) then
+
+            encounter.phase = "resolve"
+            encounter.lastActivity = now
+            return
+        end
+
+        if encounter.attempts >= 3
+            and now - encounter.lastAttempt > 1.5 then
+
+            finishEncounter("Porta sem interacao confirmada.")
+            return
+        end
+
+        if now - encounter.lastAttempt > 1.5 then
+            encounter.lastAttempt = now
+            encounter.attempts += 1
+
+            triggerPrompt(door.prompt)
+            updateUI("Batendo na porta...")
+        end
+
+        return
+    end
+
+    scanEncounterEnemies(encounter)
+
+    -- Uma conversa aberta NUNCA e interrompida por NPC comum.
+    if dialogueTick(encounter) then
+        updateUI("Respondendo NPC automaticamente...")
+        return
+    end
+
+    local pending = nearestPending(root.Position)
+    if pending then
+        updateUI("Monstros pendentes: " .. pending.Name)
+        return
+    end
+
+    if encounter.empty
+        and now - encounter.lastActivity > 2 then
+
+        finishEncounter("Ninguem atendeu a porta.")
+        return
+    end
+
+    if encounter.candy > 0
+        and now - math.max(
+            encounter.lastSpawn,
+            encounter.lastReward
+        ) >= C.SpawnGrace then
+
+        finishEncounter(
+            "Candy recebido: "
+                .. encounter.candy
+        )
+        return
+    end
+
+    if now - encounter.started >= C.DoorTimeout then
+        finishEncounter("Tempo limite da porta.")
+        return
+    end
+
+    if now - encounter.lastActivity > 16 then
+        finishEncounter("Sem novo resultado da porta.")
+        return
+    end
+
+    updateUI("Aguardando NPC ou recompensa...")
+end
+
+-- =========================================
+-- FARM DE ABOBORAS
+-- =========================================
+
+local function nearestPumpkin(position)
+    local folder = Workspace:FindFirstChild(
+        "PumpkinHunt", true
+    )
+
+    if not folder then return nil end
+
+    local chosen
+    local nearest = C.SearchRadius
+
+    for _, model in ipairs(folder:GetDescendants()) do
+        if model:IsA("Model")
+            and model.Name == "Pumpkin"
+            and (pumpkinCooldowns[model] or 0) <= os.clock() then
+
+            local part = pumpkinPart(model)
+
+            if part then
+                local dist = (
+                    position - part.Position
+                ).Magnitude
+
+                if dist < nearest then
+                    chosen = model
+                    nearest = dist
+                end
+            end
+        end
+    end
+
+    return chosen
+end
+
+local function pumpkinTick()
+    local _, _, root = characterParts()
+    if not root then return end
+
+    local jack = findBoss("jack", "lantern")
+
+    if jack then
+        combatTick("Enemy", jack)
+        return
+    end
+
+    local pumpkin = S.pumpkinTarget
+
+    if pumpkin and not pumpkinPart(pumpkin) then
+        S.completedPumpkins += 1
+
+        pumpkinCooldowns[pumpkin] =
+            os.clock() + 8
+
+        S.pumpkinTarget = nil
+        S.combat = nil
+        S.travel = nil
+
+        updateUI("Abobora concluida.", true)
+        return
+    end
+
+    if not pumpkin then
+        pumpkin = nearestPumpkin(root.Position)
+        S.pumpkinTarget = pumpkin
+    end
+
+    if pumpkin then
+        combatTick("Pumpkin", pumpkin)
+    else
+        updateUI("Procurando aboboras...")
+    end
+end
+
+-- =========================================
+-- PRIORIDADES DO HUB
+-- =========================================
+
+-- Erros pontuais nao desligam os dois toggles. Uma chamada com erro
+-- e recuperada na proxima iteracao, sem exigir reexecutar o script.
+local function schedulerStep()
+    if not S.doors and not S.pumpkins then
+        return
+    end
+    if S.storeBusy or os.clock() < S.storePauseUntil then
+        priorityLabel.Text = "PRIORIDADE: AUTO STORE (PAUSA M1)"
+        return
+    end
+
+    local character, humanoid, root = characterParts()
+    if not character then
+        destroyFlight()
+        restoreCamera()
+        S.combat = nil
+        updateUI("Aguardando renascimento...")
+        return
+    end
+
+    protectSeat(humanoid)
+
+    -- Um dialogo existente tem prioridade a alvos comuns e boss.
+    if S.doors and S.encounter and findDialogue() then
+        priorityLabel.Text = "PRIORIDADE: DIALOGO COM NPC"
+        dialogueTick(S.encounter)
+        return
+    end
+
+    local boss = S.doors and hellfireBoss() or nil
+    if boss then
+        priorityLabel.Text = "PRIORIDADE: HELLFIRE GAS"
+        combatTick("Enemy", boss)
+        return
+    end
+
+    local enemy = S.doors and nearestPending(root.Position) or nil
+    if enemy then
+        priorityLabel.Text = "PRIORIDADE: MONSTROS DA PORTA"
+        combatTick("Enemy", enemy)
+        return
+    end
+
+    if S.doors and S.encounter then
+        priorityLabel.Text = "PRIORIDADE: HALLOWEEN PORTAS"
+        encounterTick()
+        return
+    end
+
+    local door = S.doors and nearestDoor(root.Position) or nil
+    if door then
+        priorityLabel.Text = "PRIORIDADE: HALLOWEEN PORTAS"
+        startEncounter(door)
+    elseif S.pumpkins then
+        priorityLabel.Text = "PRIORIDADE: ABOBORAS"
+        pumpkinTick()
+    else
+        priorityLabel.Text = "PRIORIDADE: AGUARDANDO"
+        updateUI("Aguardando portas...")
+    end
+end
+
+local function scheduler()
+    local lastError = ""
+    local lastWarnAt = 0
+
+    while S.alive do
+        if S.doors or S.pumpkins then
+            local ok, err = xpcall(schedulerStep, function(e)
+                return tostring(e)
+            end)
+
+            if not ok then
+                if err ~= lastError or os.clock() - lastWarnAt > 5 then
+                    warn("[HEX V4.1] Erro recuperavel:", err)
+                    lastError = err
+                    lastWarnAt = os.clock()
+                end
+                S.combat = nil
+                restoreCamera()
+                destroyFlight()
+                updateUI("Recuperando farm automaticamente...", true)
+                task.wait(0.4)
+            else
+                task.wait(C.LoopInterval)
+            end
+        else
+            task.wait(0.2)
+        end
+    end
+end
+
+-- =========================================
+-- CONTROLES
+-- =========================================
+
+local function stopEverything()
+    S.doors = false
+    S.pumpkins = false
+    S.autoGacha = false
+    S.autoStore = false
+    S.gachaStatus = "OFF"
+    S.storeStatus = "OFF"
+    S.encounter = nil
+    S.pumpkinTarget = nil
+    S.combat = nil
+    S.raidBoss = nil
+
+    restoreCamera()
+    restoreMovement()
+
+    priorityLabel.Text = "PRIORIDADE: DESATIVADO"
+    dialogueStatus("DESATIVADO")
+
+    updateUI("Todos os modos desativados.", true)
+end
+
+doorToggle.Activated:Connect(function()
+    S.doors = not S.doors
+
+    if not S.doors then
+        S.encounter = nil
+        S.raidBoss = nil
+        S.combat = nil
+        table.clear(pendingEnemies)
+    end
+
+    if not S.doors and not S.pumpkins then
+        restoreCamera()
+        restoreMovement()
+    end
+
+    updateUI(
+        "Halloween 2 V2: "
+            .. (S.doors and "ON" or "OFF"),
+        true
+    )
+end)
+
+pumpkinToggle.Activated:Connect(function()
+    S.pumpkins = not S.pumpkins
+
+    if not S.pumpkins then
+        S.pumpkinTarget = nil
+        S.combat = nil
+    end
+
+    if not S.doors and not S.pumpkins then
+        restoreCamera()
+        restoreMovement()
+    end
+
+    updateUI(
+        "Aboboras + NPCs: "
+            .. (S.pumpkins and "ON" or "OFF"),
+        true
+    )
+end)
+
+gachaToggle.Activated:Connect(function()
+    S.autoGacha = not S.autoGacha
+    if S.autoGacha then
+        S.gachaLimit = readGachaLimit()
+        S.gachaRoundAttempts = 0
+        S.gachaNextAt = os.clock()
+        S.gachaStatus = "Ativado; max " .. S.gachaLimit .. " tentativas"
+    else
+        S.gachaStatus = "OFF"
+    end
+    updateUI(nil, true)
+end)
+
+storeToggle.Activated:Connect(function()
+    S.autoStore = not S.autoStore
+    S.storeStatus = S.autoStore and "Procurando frutas fisicas..." or "OFF"
+    updateUI(nil, true)
+end)
+
+spinOnceButton.Activated:Connect(function()
+    if S.gachaBusy then return end
+    task.spawn(purchaseGacha)
+end)
+
+connect(UIS.InputBegan, function(input)
+    if input.KeyCode == Enum.KeyCode.F8 then
+        stopEverything()
+    end
+end)
+
+close.Activated:Connect(function()
+    stopEverything()
+    gui:Destroy()
+end)
+
+gui.Destroying:Connect(function()
+    stopEverything()
+    S.alive = false
+    noclipConnection:Disconnect()
+
+    for _, connection in ipairs(connections) do
+        connection:Disconnect()
+    end
+end)
+
+task.spawn(function()
+    local ok, err = xpcall(
+        scheduler,
+        function(message)
+            return tostring(message)
+        end
+    )
+
+    if not ok then
+        warn("[HEX E THEUS V4.3] " .. tostring(err))
+        stopEverything()
+    end
+end)
+
+updateUI("Pronto. Ative os modos desejados.", true)
